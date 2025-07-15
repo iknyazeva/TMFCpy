@@ -28,7 +28,7 @@ def temp_mat_file() -> Generator[str, Any, None]:
 
 def test_create_events_from_mat_correct_output(temp_mat_file: str) -> None:
     """Test correct processing of a .mat file with multiple events."""
-    result = create_events_from_mat(temp_mat_file)
+    result = create_events_from_mat(temp_mat_file, save_csv=False)
     expected = pd.DataFrame({
         'trial_type': ['event1', 'event1', 'event1', 'event2', 'event2'],
         'onset': [0., 1., 2., 4., 6.],
@@ -41,7 +41,7 @@ def test_create_events_from_mat_real_data() -> None:
     """Test that create_events_from_mat works correctly.
     Pass only when real data is available.
     """
-    result = create_events_from_mat(str(REAL_DATA_PATH))
+    result = create_events_from_mat(str(REAL_DATA_PATH), save_csv=True)
 
     assert isinstance(result, pd.DataFrame), "Result must be a pandas DataFrame"
     assert set(result.columns) == {"trial_type", "onset", "duration"}, "DataFrame must have correct columns"

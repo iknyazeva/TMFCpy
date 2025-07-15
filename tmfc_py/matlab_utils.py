@@ -1,5 +1,6 @@
 import numpy as np
 from nilearn import image
+from pathlib import Path
 import glob
 import os
 import re
@@ -9,13 +10,21 @@ import scipy.io as sio
 import pandas as pd
 
 
-def create_events_from_mat(file_path: str) -> pd.DataFrame:
+def create_events_from_mat(
+        file_path: str,
+        save_csv:bool = True,
+        save_path: str = None
+) -> pd.DataFrame:
     """Create a sorted pandas DataFrame of events (for nilearn) from a MATLAB file.
 
     This function loads a MATLAB file containing event data (onsets, durations, names),
     processes the arrays, and returns a DataFrame with columns 'trial_type', 'onset',
     and 'duration', sorted by onset time. Negative onsets are filtered out.
 
+    :param save_path: path to save the DataFrame to.
+    :type save_path: str
+    :param save_csv: if save pandas data frame to csv
+    :type save_csv: bool
     :param file_path: Path to the MATLAB file (.mat).
     :type file_path: str
     :return: DataFrame with columns 'trial_type', 'onset', and 'duration'.
@@ -57,6 +66,10 @@ def create_events_from_mat(file_path: str) -> pd.DataFrame:
 
     # Filter out negative onsets
     events_df = events_df[events_df["onset"] >= 0]
+    if save_csv:
+        if save_path is None:
+            save_path = str(Path(file_path).with_suffix('.csv'))
+        events_df.to_csv(save_path, sep='\t', index=False)
     return events_df
 
 def convert_3d_to_4d_fmri(
