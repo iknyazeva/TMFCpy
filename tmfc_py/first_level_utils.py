@@ -132,7 +132,7 @@ def create_design_matrix(
 def fit_first_level_glm_with_dm(run_imgs,
                                 design_matrices,
                                 mask_img = None,
-                                noise_model = 'ols',
+                                noise_model = 'ar',
                                 minimize_memory = False,
                                 return_residuals = True):
     t_r = 2

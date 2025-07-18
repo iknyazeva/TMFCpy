@@ -8,8 +8,91 @@ from pathlib import Path
 
 
 
-def extruct_vois_from_clean_img(clean_img, mask_img = None, seeds= None, radius = 6):
-    pass
+def extract_vois_from_clean_img(
+    clean_img: Union[str, Nifti1Image],
+    seed_mask: Optional[Union[str, Nifti1Image, List[Union[str, Nifti1Image]]]] = None,
+    seed_coords: Optional[Union[Tuple[float, float, float], List[Tuple[float, float, float]]]] = None,
+    radius: float = 6.0,
+    agg: str = 'eig'
+) -> np.ndarray:
+    """
+    Extract time series from one or multiple regions of interest (ROIs) from a denoised fMRI image.
+
+    This function extracts time series from ROIs defined by a binary mask, a list of binary masks,
+    a brain atlas, or coordinates with a specified radius. The time series for each ROI is aggregated
+    using either the mean or the first eigenvariate (SPM/gPPI style). The input image is assumed to be
+    pre-denoised (e.g., confounds regressed out). The output is a NumPy array of shape (n_timepoints,)
+    for a single ROI or (n_timepoints, n_rois) for multiple ROIs, with z-normalized time series.
+
+    Parameters
+    ----------
+    clean_img : Union[str, Nifti1Image]
+        Path to a 4D NIfTI file or a Nifti1Image object containing the denoised fMRI data.
+    seed_mask : Optional[Union[str, Nifti1Image, List[Union[str, Nifti1Image]]]]
+        A single binary mask (NIfTI file path or Nifti1Image), a list of binary masks, or a brain atlas
+        (NIfTI file with integer labels for regions). If None, seed_coords must be provided.
+    seed_coords : Optional[Union[Tuple[float, float, float], List[Tuple[float, float, float]]]]
+        A single coordinate tuple (x, y, z) or a list of coordinate tuples in the same space as clean_img.
+        Requires radius to define spherical ROIs. Ignored if seed_mask is provided.
+    radius : float, optional
+        Radius (in mm) for spherical ROIs when seed_coords is provided. Default is 6.0.
+    agg : str, optional
+        Aggregation method for ROI time series: 'mean' for averaging voxel time series or 'eig' for the
+        first eigenvariate (SPM/gPPI style). Default is 'eig'.
+
+    Returns
+    -------
+    np.ndarray
+        Z-normalized time series array. Shape is (n_timepoints,) for a single ROI or
+        (n_timepoints, n_rois) for multiple ROIs.
+
+    Raises
+    ------
+    ValueError
+        If neither seed_mask nor seed_coords is provided, if agg is invalid, or if input types are incorrect.
+    """
+    # Load clean_img
+    clean_img = _load_nifti(clean_img)
+
+    # Validate inputs
+    _validate_inputs(clean_img, seed_mask, seed_coords, agg)
+
+    # Initialize list to store time series
+    time_series_list = []
+
+    # Handle seed_mask (single mask, list of masks, or atlas)
+    if seed_mask is not None:
+        if isinstance(seed_mask, (str, Nifti1Image)):
+            seed_mask = [seed_mask]  # Convert single mask to list
+        elif not isinstance(seed_mask, list):
+            raise ValueError("seed_mask must be a str, Nifti1Image, or list of str/Nifti1Image.")
+
+        for mask in seed_mask:
+            mask = _load_nifti(mask)
+            # Check if mask is an atlas or binary mask
+            mask_data = mask.get_fdata()
+            if np.all(np.isin(mask_data, [0, 1])):  # Binary mask
+                time_series = _extract_single_mask_time_series(clean_img, mask, agg)
+                time_series_list.append(time_series)
+            else:  # Atlas
+                time_series_list.extend(_extract_atlas_time_series(clean_img, mask, agg))
+
+    # Handle seed_coords
+    elif seed_coords is not None:
+        if isinstance(seed_coords, tuple):
+            seed_coords = [seed_coords]  # Convert single coordinate to list
+        elif not isinstance(seed_coords, list):
+            raise ValueError("seed_coords must be a tuple or list of tuples.")
+        time_series_list.extend(_extract_coords_time_series(clean_img, seed_coords, radius, agg))
+
+    # Combine time series into array and z-normalize
+    time_series_array = np.column_stack(time_series_list)
+    time_series_array = (time_series_array - np.mean(time_series_array, axis=0)) / np.std(time_series_array, axis=0)
+
+    # Return single array if only one ROI
+    if time_series_array.shape[1] == 1:
+        return time_series_array[:, 0]
+    return time_series_array
 
 
 def _extract_single_mask_time_series(
@@ -138,3 +221,68 @@ def _load_nifti(img: Union[str, Nifti1Image, Path]) -> Nifti1Image:
         raise ValueError("Input must be a Nifti1Image or a valid file path.")
     return img
 
+
+def _extract_coords_time_series(
+    clean_img: Nifti1Image,
+    coords: List[Tuple[float, float, float]],
+    radius: float,
+    agg: str
+) -> List[np.ndarray]:
+    """
+    Extract and aggregate time series from spherical ROIs defined by coordinates.
+
+    Parameters
+    ----------
+    clean_img : Nifti1Image
+        Denoised 4D fMRI image.
+    coords : List[Tuple[float, float, float]]
+        List of (x, y, z) coordinates for spherical ROIs.
+    radius : float
+        Radius of spherical ROIs (in mm).
+    agg : str
+        Aggregation method ('mean' or 'eig').
+
+    Returns
+    -------
+    List[np.ndarray]
+        List of aggregated time series, each of shape (n_timepoints,).
+    """
+    masker = input_data.NiftiSpheresMasker(coords, radius=radius)
+    roi_time_series = masker.fit_transform(clean_img)
+    time_series_list = []
+    for i in range(roi_time_series.shape[1]):
+        time_series = _aggregate_time_series(roi_time_series[:, [i]], agg)
+        time_series_list.append(time_series)
+    return time_series_list
+
+def _extract_atlas_time_series(
+    clean_img: Nifti1Image,
+    atlas: Nifti1Image,
+    agg: str
+) -> List[np.ndarray]:
+    """
+    #TODO need to check
+    Extract and aggregate time series from all regions in a brain atlas.
+
+    Parameters
+    ----------
+    clean_img : Nifti1Image
+        Denoised 4D fMRI image.
+    atlas : Nifti1Image
+        Atlas with integer labels for regions.
+    agg : str
+        Aggregation method ('mean' or 'eig').
+
+    Returns
+    -------
+    List[np.ndarray]
+        List of aggregated time series, each of shape (n_timepoints,).
+    """
+    atlas_data = atlas.get_fdata()
+    labels = np.unique(atlas_data[atlas_data != 0]).astype(int)
+    time_series_list = []
+    for label in labels:
+        label_mask = image.math_img(f"img == {label}", img=atlas)
+        time_series = _extract_single_mask_time_series(clean_img, label_mask, agg)
+        time_series_list.append(time_series)
+    return time_series_list
