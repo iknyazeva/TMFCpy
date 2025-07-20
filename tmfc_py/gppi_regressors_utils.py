@@ -4,7 +4,87 @@ from nilearn import image, input_data
 from nibabel import Nifti1Image
 from scipy.linalg import svd
 from pathlib import Path
+import pandas as pd
 
+
+def create_ppi_regressor(voi, events_df, tr, microtime_resolution):
+
+
+    pass
+
+def create_raw_psych_regressor(
+        events_df: pd.DataFrame,
+        task_name: str,
+        n_vols: int,
+        tr: float,
+        microtime_resolution: int = 16,
+        amplitude_col: Optional[str] = None
+) -> np.ndarray:
+    """
+    Creates a raw (unconvolved) psychological regressor from an events DataFrame.
+
+    This function generates a vector with the same length as the number of scans,
+    where the value at each time point corresponds to the state of the specified task.
+
+    Args:
+        events_df (pd.DataFrame):
+            DataFrame with at least 'onset', 'duration', and 'trial_type' columns.
+        task_name (str):
+            The name of the condition in the 'trial_type' column to create the
+            regressor for.
+        n_vols (int):
+            The total number of scans (time points) in the fMRI run.
+        tr (float):
+            The repetition time (TR) of the fMRI data in seconds.
+        amplitude_col (str, optional):
+            The name of a column in events_df to use for the amplitude of the
+            regressor (for parametric modulation). If None, an amplitude of 1
+            is used for all events of the specified task_name. Defaults to None.
+
+    Returns:
+        np.ndarray:
+            A 1D numpy array of shape (n_scans,) representing the raw psychological
+            regressor.
+    """
+
+    # Initialize an empty vector of zeros with length equal to the number of scans
+    microtime_tr = tr / microtime_resolution
+    total_microtime_bins = n_vols * microtime_resolution
+
+    # Initialize the upsampled vector
+    psych_vector_upsampled = np.zeros(total_microtime_bins)
+
+    # Filter the DataFrame to get only the events for the specified task
+    task_events = events_df[events_df['trial_type'] == task_name]
+
+    if task_events.empty:
+        print(f"Warning: No events found for trial_type '{task_name}'. Returning a zero vector.")
+        return psych_vector_upsampled
+
+    # Determine the amplitude for each event
+    if amplitude_col:
+        if amplitude_col not in task_events.columns:
+            raise ValueError(f"Amplitude column '{amplitude_col}' not found in events DataFrame.")
+        amplitudes = task_events[amplitude_col].values
+        print(f"Using parametric modulation from column: '{amplitude_col}'")
+    else:
+        # If no amplitude column, all events have an amplitude of 1
+        amplitudes = np.ones(len(task_events))
+
+    # Iterate through each event and "turn on" the corresponding scans in the vector
+    for i, (_, row) in enumerate(task_events.iterrows()):
+        # Convert onset and duration from seconds to scan indices
+        # np.round is important for accuracy
+        start_scan = int(np.round(row['onset'] / microtime_tr))
+        end_scan = int(np.round((row['onset'] + row['duration']) / microtime_tr))
+
+        # Ensure indices are within the bounds of the scan length
+        start_scan = max(0, start_scan)
+        end_scan = min(n_vols, end_scan)
+
+        # Assign the amplitude to the vector for the duration of the event
+        psych_vector_upsampled[start_scan:end_scan] = amplitudes[i]
+    return psych_vector_upsampled
 
 
 
@@ -159,7 +239,7 @@ def _aggregate_time_series(roi_time_series: np.ndarray, agg: str) -> np.ndarray:
         u = u * d
         v = v * d
         # Scale eigenvariate as in gPPI toolbox
-        eigenvariate = u * np.sqrt(s[0] / n)
+        eigenvariate = u * np.sqrt(s[0]**2/ n)
         return eigenvariate
 
 def _validate_inputs(
