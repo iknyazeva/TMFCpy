@@ -114,7 +114,13 @@ def test_fit_first_level_glm() -> None:
                               include_events=['Nuisance'],
                               n_vols=conf_df.shape[0])
     run_imgs = convert_3d_to_4d_fmri(conf_folder)
+    flm = fit_first_level_glm_with_dm(run_imgs, dm, return_residuals=False, noise_model = 'ols')
+    beta_map = flm.compute_contrast(
+        'Nuisance',
+        output_type="effect_size",
+    )
     resids = fit_first_level_glm_with_dm(run_imgs, dm, return_residuals=True)
+
     nibabel.save(resids[0], "../data/interim/cleaned_vois_2run.nii.gz")
 
     assert True

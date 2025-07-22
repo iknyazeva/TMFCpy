@@ -2,89 +2,218 @@ import numpy as np
 from typing import Union, List, Tuple, Optional
 from nilearn import image, input_data
 from nibabel import Nifti1Image
+from bold_deconvolution import ridge_regress_deconvolution
+from scipy.stats import gamma
 from scipy.linalg import svd
 from pathlib import Path
 import pandas as pd
 
 
-def create_ppi_regressor(voi, events_df, tr, microtime_resolution):
-
-
-    pass
-
-def create_raw_psych_regressor(
-        events_df: pd.DataFrame,
-        task_name: str,
-        n_vols: int,
-        tr: float,
-        microtime_resolution: int = 16,
-        amplitude_col: Optional[str] = None
+def create_ppi_regressor(
+    voi_bold: np.ndarray,
+    events_df: pd.DataFrame,
+    task_name: str,
+    tr: float,
+    microtime_resolution: int = 16,
+    demean: bool = True
 ) -> np.ndarray:
     """
-    Creates a raw (unconvolved) psychological regressor from an events DataFrame.
+    Create a PPI interaction regressor by deconvolving a BOLD signal, multiplying with
+    a psychological regressor, and convolving with an HRF.
 
-    This function generates a vector with the same length as the number of scans,
-    where the value at each time point corresponds to the state of the specified task.
+    This function deconvolves the input BOLD signal to a neural signal, multiplies it
+    with a raw psychological regressor for the specified task, convolves the interaction
+    term with a canonical HRF, and downsamples to match the original number of volumes.
+    The output is suitable for PPI analysis in fMRI studies.
 
-    Args:
-        events_df (pd.DataFrame):
-            DataFrame with at least 'onset', 'duration', and 'trial_type' columns.
-        task_name (str):
-            The name of the condition in the 'trial_type' column to create the
-            regressor for.
-        n_vols (int):
-            The total number of scans (time points) in the fMRI run.
-        tr (float):
-            The repetition time (TR) of the fMRI data in seconds.
-        amplitude_col (str, optional):
-            The name of a column in events_df to use for the amplitude of the
-            regressor (for parametric modulation). If None, an amplitude of 1
-            is used for all events of the specified task_name. Defaults to None.
+    Parameters
+    ----------
+    voi_bold : numpy.ndarray
+        Preprocessed BOLD signal from a region of interest, shape (n_vols,).
+    events_df : pandas.DataFrame
+        DataFrame with columns 'onset', 'duration', and 'trial_type'.
+    task_name : str
+        Condition name in the 'trial_type' column for the psychological regressor.
+    tr : float
+        Repetition time in seconds.
+    microtime_resolution : int, optional
+        Number of microtime bins per TR. Default is 16.
+    demean : bool, optional
+        Demean psy regressor. Default is True.
 
-    Returns:
-        np.ndarray:
-            A 1D numpy array of shape (n_scans,) representing the raw psychological
-            regressor.
+    Returns
+    -------
+    numpy.ndarray
+        PPI interaction regressor, shape (n_vols,).
+
+    Raises
+    ------
+    ValueError
+        If voi_bold is empty, events_df lacks required columns, or inputs are invalid.
+    ZeroDivisionError
+        If tr is zero.
+
+    Examples
+    --------
+    >>> import pandas as pd
+    >>> import numpy as np
+    >>> voi_bold = np.random.randn(100)  # Example BOLD signal
+    >>> events = pd.DataFrame({
+    ...     'onset': [2.0, 10.0],
+    ...     'duration': [4.0, 4.0],
+    ...     'trial_type': ['taskA', 'taskA']
+    ... })
+    >>> ppi_regressor = create_ppi_regressor(voi_bold, events, 'taskA', tr=2.0)
+    >>> ppi_regressor.shape
+    (100,)
+    :param demean:
     """
+    # Validate inputs
+    if len(voi_bold) == 0:
+        raise ValueError("voi_bold is empty.")
+    if tr == 0:
+        raise ZeroDivisionError("tr must be greater than 0.")
+    required_columns = {'onset', 'duration', 'trial_type'}
+    if not required_columns.issubset(events_df.columns):
+        missing = required_columns - set(events_df.columns)
+        raise ValueError(f"Events DataFrame missing required columns: {missing}")
 
-    # Initialize an empty vector of zeros with length equal to the number of scans
+    # Deconvolve BOLD signal to neural signal
+    neural_signal = ridge_regress_deconvolution(
+        BOLD=voi_bold,
+        TR=tr,
+        NT=microtime_resolution
+    )
+
+    # Create psychological regressor
+    psych_regressor = create_raw_psych_regressor(
+        events_df=events_df,
+        task_name=task_name,
+        n_vols=len(voi_bold),
+        tr=tr,
+        microtime_resolution=microtime_resolution
+    )
+    if demean:
+        psych_regressor  = psych_regressor - np.mean(psych_regressor)
+    # Compute PPI interaction term
+    ppi_interaction = neural_signal * psych_regressor
+
+    # Create canonical HRF (same as in compute_xb_Hxb)
+    dt = tr / microtime_resolution
+    t = np.arange(0, 32 + dt, dt)
+    hrf = gamma.pdf(t, 6) - gamma.pdf(t, microtime_resolution) / 6
+    hrf = hrf / np.sum(hrf)
+
+    # Convolve PPI interaction with HRF
+    convolved_ppi = np.convolve(ppi_interaction, hrf, mode='full')[:len(ppi_interaction)]
+
+    # Downsample to original number of volumes
+    k = np.arange(0, len(voi_bold) * microtime_resolution, microtime_resolution)
+    ppi_regressor = convolved_ppi[k]
+
+    return ppi_regressor
+
+def create_raw_psych_regressor(
+    events_df: pd.DataFrame,
+    task_name: str,
+    n_vols: int,
+    tr: float,
+    microtime_resolution: int = 16,
+    amplitude_col: Optional[str] = None
+) -> np.ndarray:
+    """
+    Create a raw psychological regressor from an events DataFrame for PPI analysis.
+
+    This function generates a vector with the same length as the number of fMRI scans,
+    upsampled to a specified microtime resolution, where values correspond to the state
+    of the specified task. The regressor is suitable for multiplication with a physiological
+    regressor in PPI analysis. Amplitudes can be parametrically modulated using an optional
+    column in the events DataFrame.
+
+    Parameters
+    ----------
+    events_df : pandas.DataFrame
+        DataFrame containing event information with columns 'onset', 'duration', and
+        'trial_type'. Additional columns can be used for amplitude modulation.
+    task_name : str
+        Name of the condition in the 'trial_type' column to create the regressor for.
+    n_vols : int
+        Total number of scans (time points) in the fMRI run.
+    tr : float
+        Repetition time (TR) of the fMRI data in seconds.
+    microtime_resolution : int, optional
+        Number of microtime bins per TR for upsampling. Default is 16.
+    amplitude_col : str, optional
+        Name of the column in events_df for parametric modulation amplitudes.
+        If None, an amplitude of 1 is used for all events. Default is None.
+
+    Returns
+    -------
+    numpy.ndarray
+        1D array of shape (n_vols * microtime_resolution,) representing the raw
+        psychological regressor.
+
+    Raises
+    ------
+    ValueError
+        If events_df lacks required columns or amplitude_col is not found.
+
+    Examples
+    --------
+    >>> import pandas as pd
+    >>> events = pd.DataFrame({
+    ...     'onset': [2.0, 10.0],
+    ...     'duration': [4.0, 4.0],
+    ...     'trial_type': ['taskA', 'taskA'],
+    ...     'amplitude': [1.5, 2.0]
+    ... })
+    >>> regressor = create_raw_psych_regressor(events, 'taskA', n_vols=100, tr=2.0,
+    ...                                        amplitude_col='amplitude')
+    >>> regressor.shape
+    (1600,)  # 100 volumes * 16 microtime bins
+    """
+    # Validate required columns in events DataFrame
+    required_columns = {'onset', 'duration', 'trial_type'}
+    if not required_columns.issubset(events_df.columns):
+        missing = required_columns - set(events_df.columns)
+        raise ValueError(f"Events DataFrame missing required columns: {missing}")
+
+    # Calculate microtime parameters
     microtime_tr = tr / microtime_resolution
     total_microtime_bins = n_vols * microtime_resolution
 
-    # Initialize the upsampled vector
-    psych_vector_upsampled = np.zeros(total_microtime_bins)
+    # Initialize the upsampled regressor vector
+    psych_regressor = np.zeros(total_microtime_bins)
 
-    # Filter the DataFrame to get only the events for the specified task
+    # Filter events for the specified task
     task_events = events_df[events_df['trial_type'] == task_name]
-
     if task_events.empty:
         print(f"Warning: No events found for trial_type '{task_name}'. Returning a zero vector.")
-        return psych_vector_upsampled
+        return psych_regressor
 
-    # Determine the amplitude for each event
+    # Extract amplitudes for parametric modulation
     if amplitude_col:
         if amplitude_col not in task_events.columns:
-            raise ValueError(f"Amplitude column '{amplitude_col}' not found in events DataFrame.")
+            raise ValueError(f"Amplitude column '{amplitude_col}' not found in events DataFrame")
         amplitudes = task_events[amplitude_col].values
         print(f"Using parametric modulation from column: '{amplitude_col}'")
     else:
-        # If no amplitude column, all events have an amplitude of 1
         amplitudes = np.ones(len(task_events))
 
-    # Iterate through each event and "turn on" the corresponding scans in the vector
-    for i, (_, row) in enumerate(task_events.iterrows()):
-        # Convert onset and duration from seconds to scan indices
-        # np.round is important for accuracy
+    # Populate the regressor with event amplitudes
+    for idx, (_, row) in enumerate(task_events.iterrows()):
+        # Convert onset and duration to microtime bin indices
         start_scan = int(np.round(row['onset'] / microtime_tr))
         end_scan = int(np.round((row['onset'] + row['duration']) / microtime_tr))
 
-        # Ensure indices are within the bounds of the scan length
+        # Ensure indices are within bounds
         start_scan = max(0, start_scan)
-        end_scan = min(n_vols, end_scan)
+        end_scan = min(total_microtime_bins, end_scan)
 
-        # Assign the amplitude to the vector for the duration of the event
-        psych_vector_upsampled[start_scan:end_scan] = amplitudes[i]
-    return psych_vector_upsampled
+        # Assign amplitude to the regressor for the event duration
+        psych_regressor[start_scan:end_scan] = amplitudes[idx]
+
+    return psych_regressor
 
 
 
@@ -149,8 +278,11 @@ def extract_vois_from_clean_img(
 
         for mask in seed_mask:
             mask = _load_nifti(mask)
+            if mask.shape != clean_img.shape:
+                mask = image.resample_to_img(mask, clean_img, interpolation='nearest', copy_header=True,
+                                                     force_resample=True)
             # Check if mask is an atlas or binary mask
-            mask_data = mask.get_fdata()
+            mask_data = np.round(mask.get_fdata(),3)
             if np.all(np.isin(mask_data, [0, 1])):  # Binary mask
                 time_series = _extract_single_mask_time_series(clean_img, mask, agg)
                 time_series_list.append(time_series)
@@ -341,7 +473,6 @@ def _extract_atlas_time_series(
     agg: str
 ) -> List[np.ndarray]:
     """
-    #TODO need to check
     Extract and aggregate time series from all regions in a brain atlas.
 
     Parameters
